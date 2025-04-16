@@ -26,6 +26,8 @@
 #include "mDNSEmbeddedAPI.h"        // The interface we're building on top of
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <stdlib.h>
+#include <string.h>
 #include "DNSCommon.h"          // For mDNSPlatformInterfaceIndexfromInterfaceID().
 
 #if MDNSRESPONDER_SUPPORTS(APPLE, DNSSECv2)
@@ -234,6 +236,95 @@ mDNSlocal void RegCallback(mDNS *const m, ServiceRecordSet *const sr, mStatus re
     }
 }
 
+//------- Begin subtype support fns copied from uds_daemon.c
+
+// If there's a comma followed by another character,
+// FindFirstSubType overwrites the comma with a nul and returns the pointer to the next character.
+// Otherwise, it returns a pointer to the final nul at the end of the string
+mDNSlocal char *FindFirstSubType(char *p)
+{
+    while (*p)
+    {
+        if (p[0] == '\\' && p[1])
+        {
+            p += 2;
+        }
+        else if (p[0] == ',' && p[1])
+        {
+            *p++ = 0;
+            return(p);
+        }
+        else
+        {
+            p++;
+        }
+    }
+    return(p);
+}
+
+// If there's a comma followed by another character,
+// FindNextSubType overwrites the comma with a nul and returns the pointer to the next character.
+// If it finds an illegal unescaped dot in the subtype name, it returns mDNSNULL
+// Otherwise, it returns a pointer to the final nul at the end of the string
+mDNSlocal char *FindNextSubType(char *p)
+{
+    while (*p)
+    {
+        if (p[0] == '\\' && p[1])       // If escape character
+            p += 2;                     // ignore following character
+        else if (p[0] == ',')           // If we found a comma
+        {
+            if (p[1]) *p++ = 0;
+            return(p);
+        }
+        else if (p[0] == '.')
+            return(mDNSNULL);
+        else p++;
+    }
+    return(p);
+}
+
+// Returns -1 if illegal subtype found
+mDNSlocal mDNSs32 ChopSubTypes(char *regtype)
+{
+    mDNSs32 NumSubTypes = 0;
+    char *stp = FindFirstSubType(regtype);
+    while (stp && *stp)                 // If we found a comma...
+    {
+        if (*stp == ',') return(-1);
+        NumSubTypes++;
+        stp = FindNextSubType(stp);
+    }
+    if (!stp) return(-1);
+    return(NumSubTypes);
+}
+
+mDNSlocal mStatus AllocateSubTypes(mDNSu32 NumSubTypes, char *p, AuthRecord **subtypes)
+{
+    AuthRecord *st = mDNSNULL;
+    if (NumSubTypes)
+    {
+        mDNSu32 i;
+        st = (AuthRecord *) mDNSPlatformMemAllocateClear(NumSubTypes * sizeof(AuthRecord));
+        if (!st) return(mStatus_NoMemoryErr);
+        for (i = 0; i < NumSubTypes; i++)
+        {
+            mDNS_SetupResourceRecord(&st[i], mDNSNULL, mDNSInterface_Any, kDNSQType_ANY, kStandardTTL, 0, AuthRecordAny, mDNSNULL, mDNSNULL);
+            while (*p) p++;
+            p++;
+            if (!MakeDomainNameFromDNSNameString(&st[i].namestorage, p))
+            {
+                mDNSPlatformMemFree(st);
+                return(mStatus_BadParamErr);
+            }
+        }
+    }
+    *subtypes = st;
+    return(mStatus_NoError);
+}
+//------- End subtype support fns copied from uds_daemon.c
+
+
 DNSServiceErrorType DNSServiceRegister
 (
     DNSServiceRef                       *sdRef,
@@ -252,6 +343,7 @@ DNSServiceErrorType DNSServiceRegister
 {
     mStatus err = mStatus_NoError;
     const char *errormsg;
+    char* choppedRegtype = NULL;
     domainlabel n;
     domainname t, d, h, srv;
     mDNSIPPort port;
@@ -262,11 +354,21 @@ DNSServiceErrorType DNSServiceRegister
     (void)flags;            // Unused
     (void)interfaceIndex;   // Unused
 
+    // Process the service type, which may have a subtype appended to it:
+    if (!regtype || !*regtype)  { errormsg = "Bad Service Type";  goto badparam; }
+    choppedRegtype = strdup(regtype);
+    if (!choppedRegtype)        { err = mStatus_NoMemoryErr; errormsg = "No memory"; goto fail; }
+    NumSubTypes = ChopSubTypes(choppedRegtype);
+    err = AllocateSubTypes(NumSubTypes, choppedRegtype, &SubTypes);
+    if (err) { errormsg = "No memory"; goto fail; }
+    if (!*choppedRegtype || !MakeDomainNameFromDNSNameString(&t, choppedRegtype))       {errormsg = "Bad Service Type";  goto badparam;}
+    free(choppedRegtype);
+    choppedRegtype = NULL;
+
     // Check parameters
     if (!name) name = "";
     if (!name[0]) n = mDNSStorage.nicelabel;
     else if (!MakeDomainLabelFromLiteralString(&n, name))                              { errormsg = "Bad Instance Name"; goto badparam; }
-    if (!regtype || !*regtype || !MakeDomainNameFromDNSNameString(&t, regtype))        { errormsg = "Bad Service Type";  goto badparam; }
     if (!MakeDomainNameFromDNSNameString(&d, (domain && *domain) ? domain : "local.")) { errormsg = "Bad Domain";        goto badparam; }
     if (!MakeDomainNameFromDNSNameString(&h, (host   && *host  ) ? host   : ""))       { errormsg = "Bad Target Host";   goto badparam; }
     if (!ConstructServiceName(&srv, &n, &t, &d))                                       { errormsg = "Bad Name";          goto badparam; }
@@ -305,6 +407,7 @@ DNSServiceErrorType DNSServiceRegister
 badparam:
     err = mStatus_BadParamErr;
 fail:
+    free(choppedRegtype);
     LogMsg("DNSServiceBrowse(\"%s\", \"%s\") failed: %s (%ld)", regtype, domain, errormsg, err);
     return(err);
 }
@@ -423,13 +526,37 @@ DNSServiceErrorType DNSServiceBrowse
 {
     mStatus err = mStatus_NoError;
     const char *errormsg;
+    char* choppedRegtype;
+    int NumSubTypes;
     domainname t, d;
     mDNS_DirectOP_Browse *x;
     (void)flags;            // Unused
     (void)interfaceIndex;   // Unused
 
-    // Check parameters
-    if (!regtype[0] || !MakeDomainNameFromDNSNameString(&t, regtype))      { errormsg = "Illegal regtype"; goto badparam; }
+    // Process the service type, including any trailing subtype:
+    t.c[0] = 0;
+    choppedRegtype = strdup(regtype);
+    if (!choppedRegtype) { err = mStatus_NoMemoryErr; errormsg = "No memory"; goto fail; }
+    NumSubTypes = ChopSubTypes(choppedRegtype);    // Note: Modifies regtype string to remove trailing subtypes
+    if (NumSubTypes < 0 || NumSubTypes > 1)
+    {
+        errormsg = "Illegal regtype";
+        goto badparam;
+    }
+    if (NumSubTypes == 1)
+    {
+        if (!AppendDNSNameString(&t, choppedRegtype + strlen(choppedRegtype) + 1)) {
+            errormsg = "Illegal regtype";
+            goto badparam;
+        }
+    }
+    if (!choppedRegtype[0] || !AppendDNSNameString(&t, choppedRegtype)) {
+        errormsg = "Illegal regtype";
+        goto badparam;
+    }
+    free(choppedRegtype);
+    choppedRegtype = NULL;
+
     if (!MakeDomainNameFromDNSNameString(&d, *domain ? domain : "local.")) { errormsg = "Illegal domain";  goto badparam; }
 
     // Allocate memory, and handle failure
@@ -453,6 +580,7 @@ DNSServiceErrorType DNSServiceBrowse
 badparam:
     err = mStatus_BadParamErr;
 fail:
+    free(choppedRegtype);
     LogMsg("DNSServiceBrowse(\"%s\", \"%s\") failed: %s (%ld)", regtype, domain, errormsg, err);
     return(err);
 }
