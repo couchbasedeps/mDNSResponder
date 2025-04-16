@@ -1100,6 +1100,7 @@ mDNSlocal int SetupIPv6Socket(int fd)
     err = setsockopt(fd, IPPROTO_IPV6, IPV6_2292_PKTINFO, &kOn, sizeof(kOn));
     if (err < 0) { err = errno; perror("setsockopt - IPV6_PKTINFO"); }
     #else
+        err = 0;
         #warning This platform has no way to get the destination interface information for IPv6 -- will only work for single-homed hosts
     #endif
     return err;
