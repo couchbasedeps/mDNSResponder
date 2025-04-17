@@ -219,7 +219,8 @@ DNSServiceErrorType DNSSD_API TXTRecordSetValue
         if (newlen > 0xFFFF) return(kDNSServiceErr_Invalid);
         newbuf = mdns_malloc((size_t)newlen);
         if (!newbuf) return(kDNSServiceErr_NoMemory);
-        memcpy(newbuf, txtRec->buffer, txtRec->datalen);
+        if (txtRec->datalen > 0)
+            memcpy(newbuf, txtRec->buffer, txtRec->datalen);
         if (txtRec->malloced) mdns_free(txtRec->buffer);
         txtRec->buffer = newbuf;
         txtRec->buflen = (uint16_t)(newlen);
