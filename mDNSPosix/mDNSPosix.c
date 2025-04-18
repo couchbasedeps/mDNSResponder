@@ -58,6 +58,11 @@
 #include <sys/ioctl.h>
 #include <linux/sockios.h>
 #endif
+#if defined(TARGET_OS_ANDROID) && TARGET_OS_ANDROID
+// Android is missing getifaddrs() and freeifaddrs(). External code must supply an implementation.
+int  getifaddrs(struct ifaddrs** __list_ptr);
+void freeifaddrs(struct ifaddrs* __ptr);
+#endif
 
 #include "mDNSUNP.h"
 #include "GenLinkedList.h"
