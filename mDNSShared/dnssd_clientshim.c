@@ -408,7 +408,7 @@ badparam:
     err = mStatus_BadParamErr;
 fail:
     free(choppedRegtype);
-    LogMsg("DNSServiceBrowse(\"%s\", \"%s\") failed: %s (%ld)", regtype, domain, errormsg, err);
+    LogMsg("DNSServiceRegister(\"%s\", \"%s\") failed: %s (%ld)", regtype, domain, errormsg, err);
     return(err);
 }
 
@@ -441,23 +441,97 @@ DNSServiceErrorType DNSServiceAddRecord
     return(kDNSServiceErr_Unsupported);
 }
 
+
+//-- Begin code copied from uds_daemon.c
+mDNSlocal void update_callback(mDNS *const m, AuthRecord *const rr, RData *oldrd, mDNSu16 oldrdlen);
+
+mDNSlocal mStatus update_record(AuthRecord *ar, mDNSu16 rdlen, const mDNSu8 *const rdata, mDNSu32 ttl,
+    const mDNSBool *const external_advertise, const mDNSu32 request_id)
+{
+    ResourceRecord rr;
+    mStatus result;
+    const size_t rdcapacity = (rdlen > sizeof(RDataBody2)) ? rdlen : sizeof(RDataBody2);
+    RData *newrd = (RData *) calloc(1, sizeof(*newrd) - sizeof(RDataBody) + rdcapacity);
+    if (!newrd) return mStatus_NoMemoryErr;
+    mDNSPlatformMemZero(&rr, (mDNSu32)sizeof(rr));
+    rr.name     = ar->resrec.name;
+    rr.rrtype   = ar->resrec.rrtype;
+    rr.rrclass  = ar->resrec.rrclass;
+    rr.rdata    = newrd;
+    rr.rdata->MaxRDLength = (mDNSu16)rdcapacity;
+    rr.rdlength = rdlen;
+    if (!SetRData(mDNSNULL, rdata, rdata + rdlen, &rr, rdlen))
+    {
+        LogRedact(MDNS_LOG_CATEGORY_DEFAULT, MDNS_LOG_ERROR,
+            "[R%u] update_record: SetRData failed for " PRI_DM_NAME " (" PUB_S ")",
+            request_id, DM_NAME_PARAM(rr.name), DNSTypeName(rr.rrtype));
+        free(newrd);
+        return mStatus_BadParamErr;
+    }
+    rdlen = GetRDLength(&rr, mDNSfalse);
+    // BIND named (name daemon) doesn't allow TXT records with zero-length rdata. This is strictly speaking correct,
+    // since RFC 1035 specifies a TXT record as "One or more <character-string>s", not "Zero or more <character-string>s".
+    // Since some legacy apps try to create zero-length TXT records, we'll silently correct it here.
+    if (ar->resrec.rrtype == kDNSType_TXT && rdlen == 0) { rdlen = 1; newrd->u.txt.c[0] = 0; }
+
+    if (external_advertise) ar->UpdateContext = (void *)external_advertise;
+
+    result = mDNS_Update(&mDNSStorage, ar, ttl, rdlen, newrd, update_callback);
+    if (result) { LogMsg("update_record: Error %d for %s", (int)result, ARDisplayString(&mDNSStorage, ar)); free(newrd); }
+    return result;
+}
+
+mDNSlocal void update_callback(mDNS *const m, AuthRecord *const rr, RData *oldrd, mDNSu16 oldrdlen)
+{
+    mDNSBool external_advertise = (rr->UpdateContext) ? *((mDNSBool *)rr->UpdateContext) : mDNSfalse;
+    (void)m; // Unused
+
+    // There are three cases.
+    //
+    // 1. We have updated the primary TXT record of the service
+    // 2. We have updated the TXT record that was added to the service using DNSServiceAddRecord
+    // 3. We have updated the TXT record that was registered using DNSServiceRegisterRecord
+    //
+    // external_advertise is set if we have advertised at least once during the initial addition
+    // of the record in all of the three cases above. We should have checked for InterfaceID/LocalDomain
+    // checks during the first time and hence we don't do any checks here
+    if (external_advertise)
+    {
+        ResourceRecord ext = rr->resrec;
+        #if MDNSRESPONDER_SUPPORTS(APPLE, D2D)
+        DNSServiceFlags flags = deriveD2DFlagsFromAuthRecType(rr->ARType);
+        #endif
+
+        if (ext.rdlength == oldrdlen && mDNSPlatformMemSame(&ext.rdata->u, &oldrd->u, oldrdlen)) goto exit;
+        SetNewRData(&ext, oldrd, oldrdlen);
+        #if MDNSRESPONDER_SUPPORTS(APPLE, D2D)
+        external_stop_advertising_service(&ext, flags, 0);
+        LogRedact(MDNS_LOG_CATEGORY_D2D, MDNS_LOG_DEFAULT, "update_callback: calling external_start_advertising_service");
+        external_start_advertising_service(&rr->resrec, flags, 0);
+        #endif
+    }
+    exit:
+        if (oldrd != &rr->rdatastorage) free(oldrd);
+}
+//-- End code copied from uds_daemon.c
+
+
 DNSServiceErrorType DNSServiceUpdateRecord
 (
     DNSServiceRef sdRef,
     DNSRecordRef RecordRef,                            /* may be NULL */
     DNSServiceFlags flags,
     uint16_t rdlen,
-    const void                          *rdata,
+    const void *rdata,
     uint32_t ttl
 )
 {
-    (void)sdRef;        // Unused
-    (void)RecordRef;    // Unused
-    (void)flags;        // Unused
-    (void)rdlen;        // Unused
-    (void)rdata;        // Unused
-    (void)ttl;          // Unused
-    return(kDNSServiceErr_Unsupported);
+    if (RecordRef != NULL)
+        return kDNSServiceErr_Unsupported;  // We're only implementing TXT record support --Jens
+    mDNS_DirectOP_Register* x = (mDNS_DirectOP_Register*)sdRef;
+    AuthRecord *rr = &x->s.RR_TXT;
+    return update_record(rr, rdlen, rdata, ttl, NULL/*&i->external_advertise*/, 0);
+    // I believe `external_advertise` is only relevant on Apple platforms --Jens
 }
 
 DNSServiceErrorType DNSServiceRemoveRecord
