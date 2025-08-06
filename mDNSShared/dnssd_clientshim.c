@@ -204,35 +204,34 @@ mDNSlocal void RegCallback(mDNS *const m, ServiceRecordSet *const sr, mStatus re
 
     domainlabel name;
     domainname type, dom;
-    char namestr[MAX_DOMAIN_LABEL+1];       // Unescaped name: up to 63 bytes plus C-string terminating NULL.
-    char typestr[MAX_ESCAPED_DOMAIN_NAME];
-    char domstr [MAX_ESCAPED_DOMAIN_NAME];
-    if (!DeconstructServiceName(sr->RR_SRV.resrec.name, &name, &type, &dom)) return;
-    if (!ConvertDomainLabelToCString_unescaped(&name, namestr)) return;
-    if (!ConvertDomainNameToCString(&type, typestr)) return;
-    if (!ConvertDomainNameToCString(&dom, domstr)) return;
+    char namestr[MAX_DOMAIN_LABEL+1] = {0};   // Unescaped name: up to 63 bytes plus C-string terminating NULL.
+    char typestr[MAX_ESCAPED_DOMAIN_NAME] = {0};
+    char domstr [MAX_ESCAPED_DOMAIN_NAME] = {0};
+    if (!DeconstructServiceName(sr->RR_SRV.resrec.name, &name, &type, &dom)
+            || !ConvertDomainLabelToCString_unescaped(&name, namestr)
+            || !ConvertDomainNameToCString(&type, typestr)
+            || !ConvertDomainNameToCString(&dom, domstr)) {
+        debugf("DNSServiceRegister: Stringifying the service name failed");
+        result = mStatus_UnknownErr;
+    }
 
-    if (result == mStatus_NoError)
+    if (result == mStatus_NameConflict && x->autoname)
     {
-        if (x->callback)
-            x->callback((DNSServiceRef)x, 0, result, namestr, typestr, domstr, x->context);
+        mDNS_RenameAndReregisterService(m, sr, mDNSNULL);
     }
-    else if (result == mStatus_NameConflict)
+    else if (result == mStatus_MemFree && x->autoname)
     {
-        if (x->autoname) mDNS_RenameAndReregisterService(m, sr, mDNSNULL);
-        else if (x->callback)
-            x->callback((DNSServiceRef)x, 0, result, namestr, typestr, domstr, x->context);
+        x->autorename = mDNSfalse;
+        x->name = mDNSStorage.nicelabel;
+        mDNS_RenameAndReregisterService(m, &x->s, &x->name);
     }
-    else if (result == mStatus_MemFree)
+    else if (x->callback)
     {
-        if (x->autorename)
-        {
-            x->autorename = mDNSfalse;
-            x->name = mDNSStorage.nicelabel;
-            mDNS_RenameAndReregisterService(m, &x->s, &x->name);
-        }
-        else
-            FreeDNSServiceRegistration(x);
+        x->callback((DNSServiceRef)x, 0, result, namestr, typestr, domstr, x->context);
+    }
+    else if (result != mStatus_NoError)
+    {
+        FreeDNSServiceRegistration(x);
     }
 }
 
