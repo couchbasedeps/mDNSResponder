@@ -190,6 +190,7 @@ static void DNSServiceRegisterDispose(mDNS_DirectOP *op)
 {
     mDNS_DirectOP_Register *x = (mDNS_DirectOP_Register*)op;
     x->autorename = mDNSfalse;
+    x->callback = NULL;
     // If mDNS_DeregisterService() returns mStatus_NoError, that means that the service was found in the list,
     // is sending its goodbye packet, and we'll get an mStatus_MemFree message when we can free the memory.
     // If mDNS_DeregisterService() returns an error, it means that the service had already been removed from
