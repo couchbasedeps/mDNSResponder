@@ -73,6 +73,8 @@ static const uint8_t *InternalTXTRecordSearch
     unsigned long    *keylen
 )
 {
+    if (txtRecord == NULL)
+        return NULL;
     const uint8_t *p = (const uint8_t*)txtRecord;
     const uint8_t *e = p + txtLen;
     *keylen = (unsigned long) strlen(key);
