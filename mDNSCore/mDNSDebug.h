@@ -723,4 +723,7 @@ extern void freeL(const char *msg, void *x);
 
 extern void LogToFD(int fd, const char *format, ...);
 
+/* Custom callback for handling log messages. If non-NULL, will be called for all log messages. */
+extern void (*mDNS_LoggingCallback)(const char* message, mDNSLogLevel_t level);
+
 #endif // __mDNSDebug_h

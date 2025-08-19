@@ -46,6 +46,9 @@ mDNSexport int gNumOfSensitiveLoggingEnabledQuestions = 0;
 mDNSexport int gSensitiveLoggingEnabled = 0;
 #endif
 
+mDNSexport void (*mDNS_LoggingCallback)(const char* message, mDNSLogLevel_t level);
+
+
 // Note, this uses mDNS_vsnprintf instead of standard "vsnprintf", because mDNS_vsnprintf knows
 // how to print special data types like IP addresses and length-prefixed domain names
 #if MDNS_DEBUGMSGS > 1
@@ -56,7 +59,11 @@ mDNSexport void verbosedebugf_(const char *format, ...)
     va_start(args, format);
     mDNS_vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
-    mDNSPlatformWriteDebugMsg(buffer);
+    if (mDNS_LoggingCallback) {
+        mDNS_LoggingCallback(buffer, MDNS_LOG_DEBUG);
+    } else {
+        mDNSPlatformWriteDebugMsg(buffer);
+    }
 }
 #endif
 
@@ -83,7 +90,12 @@ mDNSlocal void LogMsgWithLevelv(const char *category, mDNSLogLevel_t level, cons
     const char *const lim = &buffer[512];
     if (category) mDNS_snprintf_add(&dst, lim, "%s: ", category);
     mDNS_vsnprintf(dst, (mDNSu32)(lim - dst), format, args);
-    mDNSPlatformWriteLogMsg(ProgramName, buffer, level);
+
+    if (mDNS_LoggingCallback) {
+        mDNS_LoggingCallback(buffer, level);
+    } else {
+        mDNSPlatformWriteLogMsg(ProgramName, buffer, level);
+    }
 }
 #endif
 
